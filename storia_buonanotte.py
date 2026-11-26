@@ -45,25 +45,23 @@ PROFILES_HEADERS = [
     },
 ]
 
-INDIZI_VANGELO = (
-    "vangelo",
-    "in quel tempo",
-    "secondo matteo",
-    "secondo marco",
-    "secondo luca",
-    "secondo giovanni",
-    "gesù",
-    "discepoli",
-)
-
 RIFERIMENTO_BIBLICO_RE = re.compile(
     r"\b(?:Mt|Mc|Lc|Gv|Matteo|Marco|Luca|Giovanni)\s+\d{1,2}\s*,\s*\d{1,3}(?:\s*[-–]\s*\d{1,3})?",
     re.IGNORECASE,
 )
 
-ESCLUSIONI_ARTICOLO = (
+TERMINATORI_BLOCCANTI = (
+    "card.",
+    "cardinale",
+    "vescovo",
+    "papa ",
+    "convegno",
     "corso di formazione",
     "generazioni in rete",
+    "elezioni",
+    "nomina",
+    "intervista",
+    "podcast",
 )
 
 
@@ -92,11 +90,18 @@ def scarica_url(url, timeout=25):
     raise RuntimeError(f"Impossibile scaricare {url}")
 
 
-def ha_indizio_vangelo(titolo, testo):
+def e_contenuto_vangelo_valido(titolo, testo):
+    t_low = (titolo or "").lower()
     insieme = f"{titolo} {testo}".lower()
-    if any(escl in insieme for escl in ESCLUSIONI_ARTICOLO):
+    if any(bad in t_low for bad in TERMINATORI_BLOCCANTI):
         return False
-    return any(k in insieme for k in INDIZI_VANGELO) or bool(RIFERIMENTO_BIBLICO_RE.search(insieme))
+    if any(bad in insieme for bad in ("corso di formazione", "generazioni in rete")):
+        return False
+    ha_riferimento = bool(RIFERIMENTO_BIBLICO_RE.search(f"{titolo} {testo}"))
+    ha_inizio_liturgico = "in quel tempo" in insieme or any(
+        k in t_low for k in ("vangelo", "parola del giorno", "liturgia del giorno", "luca ", "matteo ", "marco ", "giovanni ")
+    )
+    return ha_riferimento or ha_inizio_liturgico
 
 
 def estrai_riferimento(titolo, testo):
@@ -105,14 +110,12 @@ def estrai_riferimento(titolo, testo):
 
 
 def isola_passo_vangelo(testo):
-    """Cerca di isolare il brano evangelico partendo da 'In quel tempo' o dal Vangelo."""
     if not testo:
         return ""
     idx_tempo = testo.lower().find("in quel tempo")
     if idx_tempo != -1:
-        porzione = testo[idx_tempo:]
-        return porzione[:3200].strip()
-    return testo[:3200].strip()
+        return testo[idx_tempo:idx_tempo + 2800].strip()
+    return testo[:2800].strip()
 
 
 def corrisponde_a_oggi(testo_controllo, ora=None):
@@ -144,9 +147,7 @@ def corrisponde_a_oggi(testo_controllo, ora=None):
         12: "dicembre",
     }
     nome_mese = mesi_it[rif.month]
-    return bool(
-        re.search(rf"\b0?{rif.day}\s+{nome_mese}(?:\s+{anno})?\b", low)
-    )
+    return bool(re.search(rf"\b0?{rif.day}\s+{nome_mese}(?:\s+{anno})?\b", low))
 
 
 def estrai_json_ld(soup):
@@ -163,7 +164,7 @@ def estrai_json_ld(soup):
             if isinstance(obj, dict):
                 titolo = pulisci(obj.get("headline") or obj.get("name") or "")
                 corpo = pulisci(obj.get("articleBody") or obj.get("description") or "")
-                if len(corpo) >= 120 and ha_indizio_vangelo(titolo, corpo):
+                if len(corpo) >= 120 and e_contenuto_vangelo_valido(titolo, corpo):
                     return titolo or "Vangelo del giorno", isola_passo_vangelo(corpo)
     return "", ""
 
@@ -187,7 +188,7 @@ def estrai_html(html_content):
             righe.append(testo)
 
     testo_unito = "\n\n".join(righe).strip()
-    if len(testo_unito) >= 120 and ha_indizio_vangelo(titolo, testo_unito):
+    if len(testo_unito) >= 120 and e_contenuto_vangelo_valido(titolo, testo_unito):
         return titolo, isola_passo_vangelo(testo_unito)
     return titolo, ""
 
@@ -200,6 +201,8 @@ def trova_link_vangelo(base_url, html_content):
         full = urljoin(base_url, a["href"].strip()).split("#")[0]
         low = full.lower()
         txt = a.get_text(" ", strip=True).lower()
+        if any(bad in f"{low} {txt}" for bad in TERMINATORI_BLOCCANTI):
+            continue
         if "vaticannews.va/it/" in low or "chiesacattolica.it" in low:
             if any(k in low or k in txt for k in ("vangelo", "parola-del-giorno", "liturgia")):
                 if not any(b in low for b in ("/podcast/", "/audio/", "/video/")):
@@ -242,7 +245,7 @@ def recupera_da_feed():
                     try:
                         pagina_voce = scarica_url(link_voce, timeout=20)
                         tit_p, testo_p = estrai_html(pagina_voce.text)
-                        if len(testo_p) > len(testo) and ha_indizio_vangelo(tit_p, testo_p):
+                        if len(testo_p) > len(testo) and e_contenuto_vangelo_valido(tit_p, testo_p):
                             testo = testo_p
                             if tit_p and tit_p != "Vangelo del giorno":
                                 titolo = tit_p
@@ -250,12 +253,12 @@ def recupera_da_feed():
                         pass
 
                 passo = isola_passo_vangelo(testo)
-                if len(passo) >= 80 and ha_indizio_vangelo(titolo, passo):
+                if len(passo) >= 80 and e_contenuto_vangelo_valido(titolo, passo):
                     rif = estrai_riferimento(titolo, passo)
                     etichetta = f"{titolo} ({rif})" if rif and rif.lower() not in titolo.lower() else titolo
                     print(f"[INFO] Fonte Vangelo trovata su feed: {feed_url} | {etichetta}")
                     print(f"[INFO] Estratto Vangelo: {passo[:180]}...")
-                    return etichetta, passo[:4500]
+                    return etichetta, passo[:3200]
         except Exception as e:
             print(f"[WARN] Feed non disponibile ({feed_url}): {e}")
             continue
@@ -274,7 +277,7 @@ def recupera_da_pagine():
                 etichetta = f"{titolo} ({rif})" if rif and rif.lower() not in titolo.lower() else titolo
                 print(f"[INFO] Fonte Vangelo trovata su pagina: {url} | {etichetta}")
                 print(f"[INFO] Estratto Vangelo: {testo[:180]}...")
-                return etichetta, testo[:4500]
+                return etichetta, testo[:3200]
             for link in trova_link_vangelo(url, r.text):
                 if link not in candidati:
                     candidati.append(link)
@@ -294,7 +297,7 @@ def recupera_da_pagine():
                 etichetta = f"{titolo} ({rif})" if rif and rif.lower() not in titolo.lower() else titolo
                 print(f"[INFO] Fonte Vangelo trovata su articolo: {link} | {etichetta}")
                 print(f"[INFO] Estratto Vangelo: {testo[:180]}...")
-                return etichetta, testo[:4500]
+                return etichetta, testo[:3200]
         except Exception:
             continue
 
@@ -348,29 +351,34 @@ def modelli_candidati_groq(groq_key):
     return ordinati
 
 
+def storia_ben_formata(testo):
+    pulito = (testo or "").strip()
+    if len(pulito.split()) < 60:
+        return False
+    return pulito.endswith((".", "!", "?", ".”", "!”", "?”", ".)"))
+
+
 def genera_storia(titolo, vangelo, groq_key):
     candidati = modelli_candidati_groq(groq_key)
     oggi = datetime.now().strftime("%d/%m/%Y")
 
     prompt_sistema = (
-        "Sei un narratore dolce e pacato che accompagna i bambini dai 6 ai 9 anni "
-        "verso il riposo serale a partire dal Vangelo cattolico del giorno.\n"
+        "Sei un narratore dolce, calmo e chiaro che accompagna i bambini dai 6 ai 9 anni "
+        "verso il riposo serale a partire esclusivamente dal Vangelo cattolico del giorno.\n"
         "Regole tassative:\n"
-        "1) NON inventare mai personaggi, nomi, luoghi o storie di fantasia estranei "
+        "1) NON inventare mai personaggi, nomi, luoghi o vicende di fantasia estranei "
         "al brano del Vangelo fornito.\n"
         "2) Apri con una citazione breve e fedele del passo del Vangelo del giorno "
-        "(tra virgolette), poi racconta con parole semplici e rassicuranti ciò che "
-        "dice il brano.\n"
-        "3) Scrivi un testo breve e scorrevole di 120-160 parole, adatto a bambini "
-        "di 6-9 anni, senza toni spaventosi o prediche.\n"
-        "4) Concludi sempre con una frase completa di augurio di serenità e pace "
-        "per la notte, senza mai troncare il testo."
+        "(tra virgolette), poi spiega con parole semplici e rassicuranti cosa dice il brano.\n"
+        "3) Scrivi un testo unico, scorrevole e senza ripetizioni di circa 120-150 parole, "
+        "adatto a bambini di 6-9 anni, senza toni spaventosi o prediche.\n"
+        "4) Concludi sempre con una frase completa di augurio di serenità e pace per la notte."
     )
     prompt_utente = (
         f"Data: {oggi}\n"
-        f"Riferimento del passo: {titolo}\n\n"
-        f"Testo del Vangelo del giorno:\n{vangelo}\n\n"
-        "Scrivi ora la breve storia della buonanotte con la citazione iniziale e fedele al passo."
+        f"Riferimento: {titolo}\n\n"
+        f"Brano del Vangelo:\n{vangelo}\n\n"
+        "Scrivi ora la storia della buonanotte fedele al brano, completa e senza ripetizioni."
     )
 
     headers = {
@@ -386,20 +394,20 @@ def genera_storia(titolo, vangelo, groq_key):
                 {"role": "system", "content": prompt_sistema},
                 {"role": "user", "content": prompt_utente},
             ],
-            "temperature": 0.25,
-            "max_tokens": 450,
+            "temperature": 0.2,
+            "max_tokens": 380,
         }
         resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=45)
         if resp.ok:
             storia = resp.json()["choices"][0]["message"]["content"].strip()
-            if storia:
+            if storia_ben_formata(storia):
                 print(f"[INFO] Storia generata con modello Groq: {modello}")
                 return f"🌙 *Buonanotte dal Vangelo*\n_{titolo}_\n\n{storia}"
-            errori.append(f"{modello}: risposta vuota")
+            errori.append(f"{modello}: risposta incompleta o non valida")
         else:
             errori.append(f"{modello} ({resp.status_code}): {resp.text[:160]}")
 
-    raise RuntimeError("Nessun modello Groq ha completato la richiesta -> " + " | ".join(errori))
+    raise RuntimeError("Nessun modello Groq ha prodotto una storia completa -> " + " | ".join(errori))
 
 
 def invia_singolo_messaggio(pezzo, token, chat_id):
