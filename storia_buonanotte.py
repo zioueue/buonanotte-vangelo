@@ -219,20 +219,30 @@ def genera_storia(titolo, vangelo, groq_key):
     return f"🌙 *Buonanotte dal Vangelo*\n_{titolo}_\n\n{storia}"
 
 
-def invia_telegram(testo, token, chat_id):
+def invia_singolo_messaggio(pezzo, token, chat_id):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": testo, "parse_mode": "Markdown"}
+    payload = {"chat_id": chat_id, "text": pezzo, "parse_mode": "Markdown"}
     resp = requests.post(url, json=payload, timeout=30)
     if not resp.ok:
         payload.pop("parse_mode", None)
         resp = requests.post(url, json=payload, timeout=30)
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(f"Errore Telegram ({resp.status_code}): {resp.text[:300]}")
+
+
+def invia_telegram(testo, token, chat_id):
+    chat_pulito = str(chat_id).strip()
+    if not chat_pulito:
+        raise ValueError("TELEGRAM_CHAT_ID è vuoto.")
+
+    for i in range(0, len(testo), 3800):
+        invia_singolo_messaggio(testo[i:i + 3800], token, chat_pulito)
 
 
 def main():
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    groq_key = os.environ["GROQ_API_KEY"]
+    token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
+    chat_id = os.environ["TELEGRAM_CHAT_ID"].strip()
+    groq_key = os.environ["GROQ_API_KEY"].strip()
 
     titolo, vangelo = recupera_vangelo()
     storia = genera_storia(titolo, vangelo, groq_key)
@@ -241,4 +251,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
