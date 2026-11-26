@@ -1,15 +1,23 @@
 import html
+import json
 import os
 import re
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
+import feedparser
 import requests
 
-PAGINE_PARTENZA = [
+PAGINE_VATICAN = [
     "https://www.vaticannews.va/it/vangelo-del-giorno-e-parola-del-giorno.html",
-    "https://www.vaticannews.va/it/vangelo-del-giorno.html",
+    "https://www.vaticannews.va/it/chiesa/vangelo-del-giorno.html",
     "https://www.vaticannews.va/it.html",
 ]
+
+FEED_RISERVA = [
+    "https://vangelodelgiorno.org/IT/rss",
+    "https://www.chiesacattolica.it/feed/",
+]
+
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
@@ -19,117 +27,156 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
 }
 
-PAROLE_ESCLUSE_URL = ("/podcast/", "/audio/", "/video/", "/fotogallery/")
+
+def pulisci_stringa(s: str) -> str:
+    s = html.unescape(s or "")
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
-def estrai_articolo_da_html(html_content: str) -> tuple[str, str]:
+def estrai_testo_da_json_ld(soup: BeautifulSoup) -> tuple[str, str]:
+    for script in soup.find_all("script", type="application/ld+json"):
+        raw = script.string or script.get_text() or ""
+        if not raw.strip():
+            continue
+        try:
+            dati = json.loads(raw)
+        except Exception:
+            continue
+
+        oggetti = dati if isinstance(dati, list) else [dati]
+        for obj in oggetti:
+            if not isinstance(obj, dict):
+                continue
+            titolo = pulisci_stringa(obj.get("headline") or obj.get("name") or "")
+            corpo = pulisci_stringa(obj.get("articleBody") or obj.get("description") or "")
+            if len(corpo) >= 150:
+                return titolo or "Vangelo del giorno", corpo
+    return "", ""
+
+
+def estrai_da_html_vatican(html_content: str) -> tuple[str, str]:
     soup = BeautifulSoup(html_content, "html.parser")
 
+    titolo_json, corpo_json = estrai_testo_da_json_ld(soup)
+    if len(corpo_json) >= 150:
+        return titolo_json, corpo_json
+
     h1 = soup.find("h1")
+    og_title = soup.find("meta", property="og:title")
+    meta_desc = soup.find("meta", attrs={"name": "description"}) or soup.find(
+        "meta", property="og:description"
+    )
+
     titolo = (
-        re.sub(r"\s+", " ", h1.get_text(" ", strip=True)).strip()
-        if h1
+        pulisci_stringa(h1.get_text()) if h1 and pulisci_stringa(h1.get_text())
+        else pulisci_stringa(og_title["content"]) if og_title and og_title.get("content")
         else "Vangelo del giorno"
     )
 
-    for tag in soup(["script", "style", "nav", "header", "footer", "aside", "noscript", "button"]):
+    for tag in soup(["script", "style", "nav", "header", "footer", "aside", "noscript"]):
         tag.decompose()
 
-    candidati_blocchi = soup.find_all(["article", "main", "section", "div"])
-    miglior_testo = ""
+    righe = []
+    for el in soup.find_all(["p", "h2", "h3", "blockquote"]):
+        testo = pulisci_stringa(el.get_text())
+        if len(testo) >= 15 and testo not in righe:
+            righe.append(testo)
 
-    for blocco in candidati_blocchi:
-        testo_blocco = blocco.get_text("\n", strip=True)
-        # Evita contenitori giganteschi dell'intera pagina se ci sono blocchi più mirati
-        if 250 <= len(testo_blocco) <= 15000:
-            righe = [
-                re.sub(r"[ \t]+", " ", html.unescape(r)).strip()
-                for r in testo_blocco.splitlines()
-            ]
-            righe = [r for r in righe if len(r) >= 12]
-            testo_pulito = "\n\n".join(righe)
-            if len(testo_pulito) > len(miglior_testo):
-                miglior_testo = testo_pulito
+    testo_unito = "\n\n".join(righe).strip()
+    if len(testo_unito) >= 120:
+        return titolo, testo_unito
 
-    if not miglior_testo:
-        paragrafi = []
-        for p in soup.find_all(["p", "h2", "h3"]):
-            riga = re.sub(r"\s+", " ", html.unescape(p.get_text(" ", strip=True))).strip()
-            if len(riga) >= 12 and riga not in paragrafi:
-                paragrafi.append(riga)
-        miglior_testo = "\n\n".join(paragrafi)
+    if meta_desc and meta_desc.get("content"):
+        desc = pulisci_stringa(meta_desc["content"])
+        if len(desc) >= 60:
+            return titolo, desc
 
-    return titolo, miglior_testo.strip()
+    return titolo, ""
 
 
-def trova_link_vangelo_in_pagina(base_url: str, html_content: str) -> list[str]:
+def trova_link_vatican(base_url: str, html_content: str) -> list[str]:
     soup = BeautifulSoup(html_content, "html.parser")
-    prioritari = []
-    secondari = []
-
+    trovati = []
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
-        full_url = urljoin(base_url, href).split("#")[0]
-        url_lower = full_url.lower()
-        testo_link = a.get_text(" ", strip=True).lower()
-
-        if "vaticannews.va/it/" not in url_lower or not url_lower.endswith(".html"):
-            continue
-        if any(esclusa in url_lower for esclusa in PAROLE_ESCLUSE_URL):
-            continue
-
-        if "vangelo-del-giorno" in url_lower or "parola-del-giorno" in url_lower:
-            if full_url not in prioritari:
-                prioritari.append(full_url)
-        elif "vangelo" in url_lower or "vangelo" in testo_link:
-            if full_url not in secondari:
-                secondari.append(full_url)
-
-    ordinati = []
-    for u in prioritari + secondari:
-        if u not in ordinati:
-            ordinati.append(u)
-    return ordinati
+        full = urljoin(base_url, href).split("#")[0]
+        low = full.lower()
+        txt = a.get_text(" ", strip=True).lower()
+        if "vaticannews.va/it/" in low and low.endswith(".html"):
+            if any(k in low or k in txt for k in ("vangelo", "parola-del-giorno", "liturgia")):
+                if not any(bad in low for bad in ("/podcast/", "/audio/", "/video/")):
+                    if full not in trovati:
+                        trovati.append(full)
+    return trovati
 
 
-def recupera_vangelo_vatican_news() -> tuple[str, str]:
-    errori = []
-    url_da_visitare = []
-    url_gia_visti = set()
+def recupera_da_vatican() -> tuple[str, str]:
+    candidati = []
+    visti = set()
 
-    for start_url in PAGINE_PARTENZA:
+    for url in PAGINE_VATICAN:
         try:
-            resp = requests.get(start_url, headers=HEADERS, timeout=25)
-            resp.raise_for_status()
-            titolo, testo = estrai_articolo_da_html(resp.text)
-            if "vangelo" in (titolo + " " + testo[:500]).lower() and len(testo) >= 250:
+            r = requests.get(url, headers=HEADERS, timeout=25)
+            r.raise_for_status()
+            titolo, testo = estrai_da_html_vatican(r.text)
+            if len(testo) >= 150 and "vangelo" in (titolo + " " + testo[:400]).lower():
                 return titolo, testo[:4000]
+            for link in trova_link_vatican(url, r.text):
+                if link not in candidati:
+                    candidati.append(link)
+        except Exception:
+            continue
 
-            for link in trova_link_vangelo_in_pagina(start_url, resp.text):
-                if link not in url_gia_visti and link not in url_da_visitare:
-                    url_da_visitare.append(link)
-        except Exception as exc:
-            errori.append(f"{start_url}: {exc}")
-
-    for link in url_da_visitare[:12]:
-        url_gia_visti.add(link)
+    for link in candidati[:10]:
+        if link in visti:
+            continue
+        visti.add(link)
         try:
-            resp = requests.get(link, headers=HEADERS, timeout=25)
-            resp.raise_for_status()
-            titolo, testo = estrai_articolo_da_html(resp.text)
-            if len(testo) >= 250:
+            r = requests.get(link, headers=HEADERS, timeout=25)
+            r.raise_for_status()
+            titolo, testo = estrai_da_html_vatican(r.text)
+            if len(testo) >= 150:
                 return titolo, testo[:4000]
-            errori.append(f"{link}: testo troppo corto ({len(testo)} car.)")
-        except Exception as exc:
-            errori.append(f"{link}: {exc}")
+        except Exception:
+            continue
 
-    raise ValueError(
-        "Impossibile recuperare un testo completo del Vangelo da Vatican News -> "
-        + " | ".join(errori[:6])
-    )
+    raise ValueError("Vatican News non ha restituito un testo completo via HTTP statico.")
+
+
+def recupera_da_riserva() -> tuple[str, str]:
+    for feed_url in FEED_RISERVA:
+        try:
+            r = requests.get(feed_url, headers=HEADERS, timeout=25)
+            r.raise_for_status()
+            parsed = feedparser.parse(r.content)
+            for voce in parsed.entries[:5]:
+                titolo = pulisci_stringa(voce.get("title") or "Vangelo del giorno")
+                grezzo = (
+                    voce.get("summary")
+                    or voce.get("description")
+                    or (voce.get("content", [{}])[0].get("value", ""))
+                    or ""
+                )
+                testo = pulisci_stringa(grezzo)
+                if len(testo) >= 120:
+                    return titolo, testo[:4000]
+        except Exception:
+            continue
+
+    raise ValueError("Nessuna fonte disponibile al momento per il Vangelo del giorno.")
+
+
+def recupera_vangelo() -> tuple[str, str]:
+    try:
+        return recupera_da_vatican()
+    except Exception:
+        return recupera_da_riserva()
 
 
 def genera_storia(titolo: str, vangelo: str, groq_key: str) -> str:
@@ -143,7 +190,7 @@ def genera_storia(titolo: str, vangelo: str, groq_key: str) -> str:
     )
     user_prompt = (
         f"Titolo/riferimento del giorno: {titolo}\n\n"
-        f"Testo del Vangelo del giorno (da Vatican News):\n{vangelo}\n\n"
+        f"Testo del Vangelo del giorno:\n{vangelo}\n\n"
         "Scrivi ora la storia della buonanotte per stasera."
     )
 
@@ -188,7 +235,7 @@ def main() -> None:
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
     groq_key = os.environ["GROQ_API_KEY"]
 
-    titolo, vangelo = recupera_vangelo_vatican_news()
+    titolo, vangelo = recupera_vangelo()
     storia = genera_storia(titolo, vangelo, groq_key)
     invia_telegram(storia, token, chat_id)
 
