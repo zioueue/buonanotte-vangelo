@@ -1,12 +1,13 @@
 import html
 import os
 import re
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 import requests
 
-VATICAN_NEWS_URLS = [
+PAGINE_PARTENZA = [
     "https://www.vaticannews.va/it/vangelo-del-giorno.html",
-    "https://www.vaticannews.va/it/vangelo-del-giorno.rss.xml",
+    "https://www.vaticannews.va/it.html",
 ]
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -31,22 +32,18 @@ def pulisci_testo(raw_text: str) -> str:
     return "\n".join(righe)
 
 
-def estrai_da_pagina_html(html_content: str) -> tuple[str, str]:
+def estrai_articolo_da_html(html_content: str) -> tuple[str, str]:
     soup = BeautifulSoup(html_content, "html.parser")
 
-    # Cerca il titolo principale della pagina
     h1 = soup.find("h1")
-    titolo = h1.get_text(" ", strip=True) if h1 else "Vangelo del giorno — Vatican News"
-    titolo = re.sub(r"\s+", " ", titolo).strip()
+    titolo = re.sub(r"\s+", " ", h1.get_text(" ", strip=True)).strip() if h1 else "Vangelo del giorno"
 
-    # Cerca il contenitore del testo dell'articolo/vangelo
     contenitore = (
         soup.find("section", class_=re.compile(r"editorial|body|text", re.I))
         or soup.find("div", class_=re.compile(r"editorial|body|text|content", re.I))
         or soup.find("article")
         or soup.body
     )
-
     if not contenitore:
         return titolo, ""
 
@@ -56,47 +53,60 @@ def estrai_da_pagina_html(html_content: str) -> tuple[str, str]:
     paragrafi = []
     for p in contenitore.find_all(["p", "h2", "h3"]):
         riga = re.sub(r"\s+", " ", p.get_text(" ", strip=True)).strip()
-        if len(riga) >= 20 and riga not in paragrafi:
+        if len(riga) >= 25 and riga not in paragrafi:
             paragrafi.append(riga)
 
     testo = "\n\n".join(paragrafi).strip()
-    if not testo:
-        testo = pulisci_testo(str(contenitore))
-
     return titolo, testo
+
+
+def trova_link_vangelo_in_pagina(base_url: str, html_content: str) -> list[str]:
+    soup = BeautifulSoup(html_content, "html.parser")
+    candidati = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        testo_link = a.get_text(" ", strip=True).lower()
+        full_url = urljoin(base_url, href)
+        if "vaticannews.va/it/" not in full_url or not full_url.endswith(".html"):
+            continue
+        if "vangelo" in full_url.lower() or "vangelo" in testo_link:
+            if full_url not in candidati:
+                candidati.append(full_url)
+    return candidati
 
 
 def recupera_vangelo_vatican_news() -> tuple[str, str]:
     errori = []
+    url_da_visitare = []
+    url_gia_visti = set()
 
-    for url in VATICAN_NEWS_URLS:
+    for start_url in PAGINE_PARTENZA:
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=25)
+            resp = requests.get(start_url, headers=HEADERS, timeout=25)
             resp.raise_for_status()
+            titolo, testo = estrai_articolo_da_html(resp.text)
+            if "vangelo" in (titolo + " " + testo[:400]).lower() and len(testo) > 120:
+                return titolo, testo[:4000]
 
-            if url.endswith(".xml"):
-                soup = BeautifulSoup(resp.content, "xml")
-                item = soup.find("item")
-                if not item:
-                    errori.append(f"{url}: nessun <item> trovato")
-                    continue
-                titolo_tag = item.find("title")
-                desc_tag = item.find("description")
-                titolo = titolo_tag.get_text(" ", strip=True) if titolo_tag else "Vangelo del giorno"
-                testo = pulisci_testo(desc_tag.get_text() if desc_tag else "")
-                if len(testo) > 80:
-                    return titolo, testo[:4000]
-                errori.append(f"{url}: testo troppo corto")
-            else:
-                titolo, testo = estrai_da_pagina_html(resp.text)
-                if len(testo) > 80:
-                    return titolo, testo[:4000]
-                errori.append(f"{url}: testo non estratto dalla pagina")
-
+            for link in trova_link_vangelo_in_pagina(start_url, resp.text):
+                if link not in url_gia_visti and link not in url_da_visitare:
+                    url_da_visitare.append(link)
         except Exception as exc:
-            errori.append(f"{url}: {exc}")
+            errori.append(f"{start_url}: {exc}")
 
-    raise ValueError("Impossibile leggere il Vangelo da Vatican News -> " + " | ".join(errori))
+    for link in url_da_visitare[:8]:
+        url_gia_visti.add(link)
+        try:
+            resp = requests.get(link, headers=HEADERS, timeout=25)
+            resp.raise_for_status()
+            titolo, testo = estrai_articolo_da_html(resp.text)
+            if len(testo) > 120:
+                return titolo, testo[:4000]
+            errori.append(f"{link}: testo troppo corto")
+        except Exception as exc:
+            errori.append(f"{link}: {exc}")
+
+    raise ValueError("Impossibile recuperare il Vangelo da Vatican News -> " + " | ".join(errori[:6]))
 
 
 def genera_storia(titolo: str, vangelo: str, groq_key: str) -> str:
