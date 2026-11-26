@@ -142,4 +142,213 @@ def trova_link_vangelo(base_url, html_content):
         txt = a.get_text(" ", strip=True).lower()
         if "vaticannews.va/it/" in low or "chiesacattolica.it" in low:
             if any(k in low or k in txt for k in ("vangelo", "parola-del-giorno", "liturgia")):
-                if not
+                if not any(b in low for b in ("/podcast/", "/audio/", "/video/")):
+                    if full not in trovati:
+                        trovati.append(full)
+    return trovati
+
+
+def recupera_da_feed():
+    for feed_url in FEED_RISERVA:
+        try:
+            r = scarica_url(feed_url, timeout=25)
+            parsed = feedparser.parse(r.content)
+            for voce in parsed.entries[:10]:
+                titolo = pulisci(voce.get("title") or "Vangelo del giorno")
+                grezzo = (
+                    voce.get("summary")
+                    or voce.get("description")
+                    or (voce.get("content", [{}])[0].get("value", ""))
+                    or ""
+                )
+                testo = pulisci(grezzo)
+                link_voce = pulisci(voce.get("link") or "")
+
+                if len(testo) < 150 and link_voce:
+                    try:
+                        pagina_voce = scarica_url(link_voce, timeout=20)
+                        tit_p, testo_p = estrai_html(pagina_voce.text)
+                        if len(testo_p) > len(testo) and ha_indizio_vangelo(tit_p, testo_p):
+                            testo = testo_p
+                            if tit_p and tit_p != "Vangelo del giorno":
+                                titolo = tit_p
+                    except Exception:
+                        pass
+
+                if len(testo) >= 80 and ha_indizio_vangelo(titolo, testo):
+                    print(f"[INFO] Fonte Vangelo trovata su feed: {feed_url} | {titolo}")
+                    return titolo, testo[:4500]
+        except Exception as e:
+            print(f"[WARN] Feed non disponibile ({feed_url}): {e}")
+            continue
+    return "", ""
+
+
+def recupera_da_pagine():
+    candidati = []
+    visti = set()
+    for url in PAGINE_VATICAN:
+        try:
+            r = scarica_url(url, timeout=25)
+            titolo, testo = estrai_html(r.text)
+            if len(testo) >= 150:
+                print(f"[INFO] Fonte Vangelo trovata su pagina: {url} | {titolo}")
+                return titolo, testo[:4500]
+            for link in trova_link_vangelo(url, r.text):
+                if link not in candidati:
+                    candidati.append(link)
+        except Exception as e:
+            print(f"[WARN] Pagina non disponibile ({url}): {e}")
+            continue
+
+    for link in candidati[:12]:
+        if link in visti:
+            continue
+        visti.add(link)
+        try:
+            r = scarica_url(link, timeout=25)
+            titolo, testo = estrai_html(r.text)
+            if len(testo) >= 150:
+                print(f"[INFO] Fonte Vangelo trovata su articolo: {link} | {titolo}")
+                return titolo, testo[:4500]
+        except Exception:
+            continue
+
+    return "", ""
+
+
+def recupera_vangelo():
+    titolo, testo = recupera_da_feed()
+    if testo:
+        return titolo, testo
+
+    titolo, testo = recupera_da_pagine()
+    if testo:
+        return titolo, testo
+
+    oggi = datetime.now().strftime("%d/%m/%Y")
+    print(f"[WARN] Nessun testo web recuperato per {oggi}: uso fallback generico.")
+    return (
+        f"{QUERY_RIFERIMENTO} ({oggi})",
+        f"{QUERY_RIFERIMENTO} per la data {oggi}.",
+    )
+
+
+def modelli_candidati_groq(groq_key):
+    headers = {"Authorization": f"Bearer {groq_key}"}
+    resp = requests.get(GROQ_MODELS_URL, headers=headers, timeout=25)
+    if not resp.ok:
+        raise RuntimeError(f"Errore lettura modelli Groq ({resp.status_code}): {resp.text[:300]}")
+
+    dati = resp.json().get("data", [])
+    ids_disponibili = [m.get("id") for m in dati if isinstance(m, dict) and m.get("id")]
+
+    esclusi = ("whisper", "guard", "tts", "embed", "orpheus", "playai")
+    modelli_chat = [
+        mid for mid in ids_disponibili
+        if not any(bad in mid.lower() for bad in esclusi)
+    ]
+
+    preferiti = [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "llama3-70b-8192",
+        "llama3-8b-8192",
+        "gemma2-9b-it",
+    ]
+    ordinati = [m for m in preferiti if m in modelli_chat]
+    for m in modelli_chat:
+        if m not in ordinati:
+            ordinati.append(m)
+
+    if not ordinati:
+        raise RuntimeError(f"Nessun modello testo trovato su Groq. Disponibili: {ids_disponibili[:10]}")
+    return ordinati
+
+
+def genera_storia(titolo, vangelo, groq_key):
+    candidati = modelli_candidati_groq(groq_key)
+    oggi = datetime.now().strftime("%d/%m/%Y")
+
+    prompt_sistema = (
+        "Sei un narratore dolce e pacato che accompagna i bambini dai 6 ai 9 anni "
+        "verso il riposo serale a partire dal Vangelo cattolico del giorno.\n"
+        "Regole tassative:\n"
+        "1) NON inventare mai personaggi, nomi o storie di fantasia (niente personaggi "
+        "o vicende inventate estranee al Vangelo). Resta fedele al testo fornito.\n"
+        "2) Riporta una breve citazione o il senso essenziale del Vangelo e racconta "
+        "con parole semplici e rassicuranti ciò che dice il brano.\n"
+        "3) Mantieni il testo breve e scorrevole (circa 120-160 parole), adatto "
+        "a bambini di 6-9 anni, senza toni spaventosi o prediche.\n"
+        "4) Concludi sempre con una frase completa di augurio di serenità e pace "
+        "per la notte, senza mai troncare il testo."
+    )
+    prompt_utente = (
+        f"Data: {oggi} ({QUERY_RIFERIMENTO})\n"
+        f"Riferimento: {titolo}\n\n"
+        f"Testo del Vangelo:\n{vangelo}\n\n"
+        "Scrivi ora il breve racconto della buonanotte fedele al Vangelo."
+    )
+
+    headers = {
+        "Authorization": f"Bearer {groq_key}",
+        "Content-Type": "application/json",
+    }
+
+    errori = []
+    for modello in candidati[:6]:
+        payload = {
+            "model": modello,
+            "messages": [
+                {"role": "system", "content": prompt_sistema},
+                {"role": "user", "content": prompt_utente},
+            ],
+            "temperature": 0.35,
+            "max_tokens": 500,
+        }
+        resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=45)
+        if resp.ok:
+            storia = resp.json()["choices"][0]["message"]["content"].strip()
+            if storia:
+                print(f"[INFO] Storia generata con modello Groq: {modello}")
+                return f"🌙 *Buonanotte dal Vangelo*\n_{titolo}_\n\n{storia}"
+            errori.append(f"{modello}: risposta vuota")
+        else:
+            errori.append(f"{modello} ({resp.status_code}): {resp.text[:160]}")
+
+    raise RuntimeError("Nessun modello Groq ha completato la richiesta -> " + " | ".join(errori))
+
+
+def invia_singolo_messaggio(pezzo, token, chat_id):
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": pezzo, "parse_mode": "Markdown"}
+    resp = requests.post(url, json=payload, timeout=30)
+    if not resp.ok:
+        payload.pop("parse_mode", None)
+        resp = requests.post(url, json=payload, timeout=30)
+    if not resp.ok:
+        raise RuntimeError(f"Errore Telegram ({resp.status_code}): {resp.text[:300]}")
+    print(f"[INFO] Telegram OK verso {chat_id} | message_id={resp.json().get('result', {}).get('message_id')}")
+
+
+def invia_telegram(testo, token, chat_id):
+    chat_pulito = str(chat_id).strip()
+    if not chat_pulito:
+        raise ValueError("TELEGRAM_CHAT_ID è vuoto.")
+
+    for i in range(0, len(testo), 3800):
+        invia_singolo_messaggio(testo[i:i + 3800], token, chat_pulito)
+
+
+def main():
+    token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
+    chat_id = os.environ["TELEGRAM_CHAT_ID"].strip()
+    groq_key = os.environ["GROQ_API_KEY"].strip()
+
+    titolo, vangelo = recupera_vangelo()
+    storia = genera_storia(titolo, vangelo, groq_key)
+    invia_telegram(storia, token, chat_id)
+
+
+if __name__ == "__main__":
+    main()
