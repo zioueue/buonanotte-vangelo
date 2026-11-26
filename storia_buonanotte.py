@@ -10,7 +10,6 @@ import requests
 PAGINE_VATICAN = [
     "https://www.vaticannews.va/it/vangelo-del-giorno-e-parola-del-giorno.html",
     "https://www.vaticannews.va/it/chiesa/vangelo-del-giorno.html",
-    "https://www.vaticannews.va/it.html",
 ]
 
 FEED_RISERVA = [
@@ -31,11 +30,28 @@ HEADERS = {
     "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
 }
 
+PAROLE_ESCLUSE = (
+    "corso di formazione",
+    "generazioni in rete",
+    "convegno",
+    "seminario",
+    "diocesi",
+    "nomina",
+    "cardinale",
+)
+
 
 def pulisci(valore):
     testo = html.unescape(valore or "")
     testo = re.sub(r"<[^>]+>", " ", testo)
     return re.sub(r"\s+", " ", testo).strip()
+
+
+def sembra_vangelo(titolo, testo):
+    insieme = f"{titolo} {testo[:800]}".lower()
+    if any(p in insieme for p in PAROLE_ESCLUSE):
+        return False
+    return ("vangelo" in insieme) or ("gesù" in insieme) or ("discepoli" in insieme)
 
 
 def estrai_json_ld(soup):
@@ -52,7 +68,7 @@ def estrai_json_ld(soup):
             if isinstance(obj, dict):
                 titolo = pulisci(obj.get("headline") or obj.get("name") or "")
                 corpo = pulisci(obj.get("articleBody") or obj.get("description") or "")
-                if len(corpo) >= 150:
+                if len(corpo) >= 200 and sembra_vangelo(titolo, corpo):
                     return titolo or "Vangelo del giorno", corpo
     return "", ""
 
@@ -60,7 +76,7 @@ def estrai_json_ld(soup):
 def estrai_html(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
     titolo_j, corpo_j = estrai_json_ld(soup)
-    if len(corpo_j) >= 150:
+    if len(corpo_j) >= 200:
         return titolo_j, corpo_j
 
     h1 = soup.find("h1")
@@ -72,16 +88,16 @@ def estrai_html(html_content):
     righe = []
     for el in soup.find_all(["p", "h2", "h3", "blockquote"]):
         testo = pulisci(el.get_text())
-        if len(testo) >= 15 and testo not in righe:
+        if len(testo) >= 20 and testo not in righe:
             righe.append(testo)
 
     testo_unito = "\n\n".join(righe).strip()
-    if len(testo_unito) >= 120:
+    if len(testo_unito) >= 200 and sembra_vangelo(titolo, testo_unito):
         return titolo, testo_unito
     return titolo, ""
 
 
-def trova_link(base_url, html_content):
+def trova_link_vangelo(base_url, html_content):
     soup = BeautifulSoup(html_content, "html.parser")
     trovati = []
     for a in soup.find_all("a", href=True):
@@ -89,14 +105,36 @@ def trova_link(base_url, html_content):
         low = full.lower()
         txt = a.get_text(" ", strip=True).lower()
         if "vaticannews.va/it/" in low and low.endswith(".html"):
-            if any(k in low or k in txt for k in ("vangelo", "parola-del-giorno", "liturgia")):
+            if "vangelo" in low or "vangelo" in txt or "parola-del-giorno" in low:
                 if not any(b in low for b in ("/podcast/", "/audio/", "/video/")):
                     if full not in trovati:
                         trovati.append(full)
     return trovati
 
 
-def recupera_vatican():
+def recupera_da_feed():
+    for feed_url in FEED_RISERVA:
+        try:
+            r = requests.get(feed_url, headers=HEADERS, timeout=25)
+            r.raise_for_status()
+            parsed = feedparser.parse(r.content)
+            for voce in parsed.entries[:8]:
+                titolo = pulisci(voce.get("title") or "Vangelo del giorno")
+                grezzo = (
+                    voce.get("summary")
+                    or voce.get("description")
+                    or (voce.get("content", [{}])[0].get("value", ""))
+                    or ""
+                )
+                testo = pulisci(grezzo)
+                if len(testo) >= 150 and sembra_vangelo(titolo, testo):
+                    return titolo, testo[:4500]
+        except Exception:
+            continue
+    return "", ""
+
+
+def recupera_da_vatican():
     candidati = []
     visti = set()
     for url in PAGINE_VATICAN:
@@ -104,9 +142,9 @@ def recupera_vatican():
             r = requests.get(url, headers=HEADERS, timeout=25)
             r.raise_for_status()
             titolo, testo = estrai_html(r.text)
-            if len(testo) >= 150 and "vangelo" in (titolo + " " + testo[:400]).lower():
-                return titolo, testo[:4000]
-            for link in trova_link(url, r.text):
+            if len(testo) >= 200:
+                return titolo, testo[:4500]
+            for link in trova_link_vangelo(url, r.text):
                 if link not in candidati:
                     candidati.append(link)
         except Exception:
@@ -120,41 +158,25 @@ def recupera_vatican():
             r = requests.get(link, headers=HEADERS, timeout=25)
             r.raise_for_status()
             titolo, testo = estrai_html(r.text)
-            if len(testo) >= 150:
-                return titolo, testo[:4000]
+            if len(testo) >= 200:
+                return titolo, testo[:4500]
         except Exception:
             continue
 
-    raise ValueError("Nessun testo trovato su Vatican News.")
-
-
-def recupera_riserva():
-    for feed_url in FEED_RISERVA:
-        try:
-            r = requests.get(feed_url, headers=HEADERS, timeout=25)
-            r.raise_for_status()
-            parsed = feedparser.parse(r.content)
-            for voce in parsed.entries[:5]:
-                titolo = pulisci(voce.get("title") or "Vangelo del giorno")
-                grezzo = (
-                    voce.get("summary")
-                    or voce.get("description")
-                    or (voce.get("content", [{}])[0].get("value", ""))
-                    or ""
-                )
-                testo = pulisci(grezzo)
-                if len(testo) >= 120:
-                    return titolo, testo[:4000]
-        except Exception:
-            continue
-    raise ValueError("Nessun feed di riserva disponibile.")
+    return "", ""
 
 
 def recupera_vangelo():
-    try:
-        return recupera_vatican()
-    except Exception:
-        return recupera_riserva()
+    # Prima proviamo i feed dedicati al Vangelo del giorno, poi Vatican News
+    titolo, testo = recupera_da_feed()
+    if testo:
+        return titolo, testo
+
+    titolo, testo = recupera_da_vatican()
+    if testo:
+        return titolo, testo
+
+    raise ValueError("Non è stato possibile recuperare un brano del Vangelo del giorno.")
 
 
 def modelli_candidati_groq(groq_key):
@@ -193,11 +215,24 @@ def genera_storia(titolo, vangelo, groq_key):
     candidati = modelli_candidati_groq(groq_key)
 
     prompt_sistema = (
-        "Scrivi una dolce storia della buonanotte per bambini (6-8 anni) "
-        "ispirata al Vangelo del giorno. Italiano semplice e sereno, senza "
-        "prediche o elementi paurosi, circa 200-250 parole, con finale calmo."
+        "Sei un narratore dolce e sereno che scrive storie della buonanotte "
+        "per bambini di 7-8 anni partendo fedelmente dal racconto del Vangelo del giorno. "
+        "Regole fondamentali:\n"
+        "1) Racconta l'episodio o il messaggio centrale del Vangelo fornito (i personaggi, "
+        "l'incontro o la parabola), adattato con dolcezza per i bambini, senza inventare "
+        "corsi, convegni o vicende estranee al brano.\n"
+        "2) Usa un linguaggio semplice, caldo e rassicurante, senza toni da predica "
+        "e senza scene spaventose.\n"
+        "3) Scrivi una storia completa di circa 220-280 parole.\n"
+        "4) Concludi sempre con una frase completa e tranquilla di buonanotte, senza "
+        "mai troncare una parola o una frase a metà."
     )
-    prompt_utente = f"Titolo: {titolo}\n\nVangelo:\n{vangelo}"
+    prompt_utente = (
+        f"Riferimento del Vangelo: {titolo}\n\n"
+        f"Testo del Vangelo del giorno:\n{vangelo}\n\n"
+        "Scrivi ora la storia della buonanotte completa per stasera."
+    )
+
     headers = {
         "Authorization": f"Bearer {groq_key}",
         "Content-Type": "application/json",
@@ -211,8 +246,8 @@ def genera_storia(titolo, vangelo, groq_key):
                 {"role": "system", "content": prompt_sistema},
                 {"role": "user", "content": prompt_utente},
             ],
-            "temperature": 0.7,
-            "max_tokens": 700,
+            "temperature": 0.65,
+            "max_tokens": 1100,
         }
         resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=45)
         if resp.ok:
@@ -258,4 +293,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
