@@ -1,0 +1,30 @@
+name: Storia della Buonanotte dal Vangelo
+
+on:
+  schedule:
+    # 18:30 UTC corrisponde alle 19:30 in ora solare (CET) in Italia
+    - cron: "30 18 * * *"
+  workflow_dispatch:
+
+jobs:
+  pubblica-storia:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scarica il codice del repository
+        uses: actions/checkout@v4
+
+      - name: Configura Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installa le librerie necessarie
+        run: pip install feedparser beautifulsoup4 requests
+
+      - name: Genera e invia la storia su Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python storia_buonanotte.py
+        
