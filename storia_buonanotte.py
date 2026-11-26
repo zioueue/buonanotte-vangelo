@@ -50,6 +50,16 @@ RIFERIMENTO_BIBLICO_RE = re.compile(
     re.IGNORECASE,
 )
 
+TITOLI_GENERICI = (
+    "messa del giorno",
+    "vangelo del giorno",
+    "parola del giorno",
+    "liturgia del giorno",
+    "vangelo del giorno e parola del giorno",
+    "vatican news",
+    "chiesa cattolica",
+)
+
 TERMINATORI_BLOCCANTI = (
     "card.",
     "cardinale",
@@ -101,18 +111,35 @@ def e_contenuto_vangelo_valido(titolo, testo):
         return False
     ha_riferimento = bool(RIFERIMENTO_BIBLICO_RE.search(f"{titolo} {testo[:600]}"))
     ha_inizio_liturgico = "in quel tempo" in insieme or any(
-        k in t_low for k in ("vangelo", "parola del giorno", "liturgia del giorno", "luca ", "matteo ", "marco ", "giovanni ")
+        k in t_low for k in ("vangelo", "parola del giorno", "liturgia del giorno", "messa del giorno", "luca ", "matteo ", "marco ", "giovanni ")
     )
     return ha_riferimento or ha_inizio_liturgico
 
 
 def estrai_riferimento(titolo, testo):
-    # Cerca prima nel titolo, poi nella prima parte del testo
     for porzione in (titolo or "", (testo or "")[:600]):
         m = RIFERIMENTO_BIBLICO_RE.search(porzione)
         if m:
             return re.sub(r"\s+", " ", m.group(0)).strip()
     return ""
+
+
+def e_titolo_generico(titolo):
+    t_pulito = re.sub(r"\s+", " ", (titolo or "")).strip().lower()
+    if not t_pulito:
+        return True
+    if t_pulito in TITOLI_GENERICI:
+        return True
+    return any(t_pulito.startswith(g) and len(t_pulito) <= len(g) + 12 for g in TITOLI_GENERICI)
+
+
+def formatta_intestazione_vangelo(titolo, testo):
+    rif = estrai_riferimento(titolo, testo)
+    if e_titolo_generico(titolo):
+        return f"Vangelo del giorno ({rif})" if rif else "Vangelo del giorno"
+    if rif and rif.lower() not in (titolo or "").lower():
+        return f"{titolo} ({rif})"
+    return titolo
 
 
 def isola_passo_vangelo(testo):
@@ -259,194 +286,4 @@ def recupera_da_feed():
                         pass
 
                 passo = isola_passo_vangelo(testo)
-                if len(passo) >= 80 and e_contenuto_vangelo_valido(titolo, passo):
-                    rif = estrai_riferimento(titolo, passo)
-                    etichetta = f"{titolo} ({rif})" if rif and rif.lower() not in titolo.lower() else titolo
-                    print(f"[INFO] Fonte Vangelo trovata su feed: {feed_url} | {etichetta}")
-                    print(f"[INFO] Estratto Vangelo: {passo[:180]}...")
-                    return etichetta, passo[:3200]
-        except Exception as e:
-            print(f"[WARN] Feed non disponibile ({feed_url}): {e}")
-            continue
-    return "", ""
-
-
-def recupera_da_pagine():
-    candidati = []
-    visti = set()
-    for url in PAGINE_VANGELO:
-        try:
-            r = scarica_url(url, timeout=25)
-            titolo, testo = estrai_html(r.text)
-            if len(testo) >= 150:
-                rif = estrai_riferimento(titolo, testo)
-                etichetta = f"{titolo} ({rif})" if rif and rif.lower() not in titolo.lower() else titolo
-                print(f"[INFO] Fonte Vangelo trovata su pagina: {url} | {etichetta}")
-                print(f"[INFO] Estratto Vangelo: {testo[:180]}...")
-                return etichetta, testo[:3200]
-            for link in trova_link_vangelo(url, r.text):
-                if link not in candidati:
-                    candidati.append(link)
-        except Exception as e:
-            print(f"[WARN] Pagina non disponibile ({url}): {e}")
-            continue
-
-    for link in candidati[:12]:
-        if link in visti:
-            continue
-        visti.add(link)
-        try:
-            r = scarica_url(link, timeout=25)
-            titolo, testo = estrai_html(r.text)
-            if len(testo) >= 150:
-                rif = estrai_riferimento(titolo, testo)
-                etichetta = f"{titolo} ({rif})" if rif and rif.lower() not in titolo.lower() else titolo
-                print(f"[INFO] Fonte Vangelo trovata su articolo: {link} | {etichetta}")
-                print(f"[INFO] Estratto Vangelo: {testo[:180]}...")
-                return etichetta, testo[:3200]
-        except Exception:
-            continue
-
-    return "", ""
-
-
-def recupera_vangelo():
-    titolo, testo = recupera_da_feed()
-    if testo:
-        return titolo, testo
-
-    titolo, testo = recupera_da_pagine()
-    if testo:
-        return titolo, testo
-
-    oggi = datetime.now().strftime("%d/%m/%Y")
-    raise RuntimeError(
-        f"Impossibile recuperare un testo reale del Vangelo per il {oggi} dalle fonti configurate."
-    )
-
-
-def modelli_candidati_groq(groq_key):
-    headers = {"Authorization": f"Bearer {groq_key}"}
-    resp = requests.get(GROQ_MODELS_URL, headers=headers, timeout=25)
-    if not resp.ok:
-        raise RuntimeError(f"Errore lettura modelli Groq ({resp.status_code}): {resp.text[:300]}")
-
-    dati = resp.json().get("data", [])
-    ids_disponibili = [m.get("id") for m in dati if isinstance(m, dict) and m.get("id")]
-
-    esclusi = ("whisper", "guard", "tts", "embed", "orpheus", "playai")
-    modelli_chat = [
-        mid for mid in ids_disponibili
-        if not any(bad in mid.lower() for bad in esclusi)
-    ]
-
-    preferiti = [
-        "llama-3.3-70b-versatile",
-        "llama-3.1-8b-instant",
-        "llama3-70b-8192",
-        "llama3-8b-8192",
-        "gemma2-9b-it",
-    ]
-    ordinati = [m for m in preferiti if m in modelli_chat]
-    for m in modelli_chat:
-        if m not in ordinati:
-            ordinati.append(m)
-
-    if not ordinati:
-        raise RuntimeError(f"Nessun modello testo trovato su Groq. Disponibili: {ids_disponibili[:10]}")
-    return ordinati
-
-
-def storia_ben_formata(testo):
-    pulito = (testo or "").strip()
-    if len(pulito.split()) < 60:
-        return False
-    return pulito.endswith((".", "!", "?", ".”", "!”", "?”", ".)"))
-
-
-def genera_storia(titolo, vangelo, groq_key):
-    candidati = modelli_candidati_groq(groq_key)
-    oggi = datetime.now().strftime("%d/%m/%Y")
-
-    prompt_sistema = (
-        "Sei un narratore dolce, calmo e chiaro che accompagna i bambini dai 6 ai 9 anni "
-        "verso il riposo serale a partire esclusivamente dal Vangelo cattolico del giorno.\n"
-        "Regole tassative:\n"
-        "1) NON inventare mai personaggi, nomi, luoghi o vicende di fantasia estranei "
-        "al brano del Vangelo fornito.\n"
-        "2) Apri con una citazione breve e fedele del passo del Vangelo del giorno "
-        "(tra virgolette), senza cambiare il Vangelo a cui appartiene il brano.\n"
-        "3) Racconta con parole semplici e adatte a bambini di 6-9 anni ciò che dice "
-        "il brano, senza ripetizioni e senza toni da adulto o predica.\n"
-        "4) Mantieni il testo intorno alle 120-150 parole e chiudi sempre con una "
-        "frase completa di augurio di serenità e pace per la notte."
-    )
-    prompt_utente = (
-        f"Data: {oggi}\n"
-        f"Riferimento: {titolo}\n\n"
-        f"Brano del Vangelo:\n{vangelo}\n\n"
-        "Scrivi ora la storia della buonanotte fedele al brano, completa e senza ripetizioni."
-    )
-
-    headers = {
-        "Authorization": f"Bearer {groq_key}",
-        "Content-Type": "application/json",
-    }
-
-    errori = []
-    for modello in candidati[:6]:
-        payload = {
-            "model": modello,
-            "messages": [
-                {"role": "system", "content": prompt_sistema},
-                {"role": "user", "content": prompt_utente},
-            ],
-            "temperature": 0.2,
-            "max_tokens": 380,
-        }
-        resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=45)
-        if resp.ok:
-            storia = resp.json()["choices"][0]["message"]["content"].strip()
-            if storia_ben_formata(storia):
-                print(f"[INFO] Storia generata con modello Groq: {modello}")
-                return f"🌙 *Buonanotte dal Vangelo*\n_{titolo}_\n\n{storia}"
-            errori.append(f"{modello}: risposta incompleta o non valida")
-        else:
-            errori.append(f"{modello} ({resp.status_code}): {resp.text[:160]}")
-
-    raise RuntimeError("Nessun modello Groq ha prodotto una storia completa -> " + " | ".join(errori))
-
-
-def invia_singolo_messaggio(pezzo, token, chat_id):
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": pezzo, "parse_mode": "Markdown"}
-    resp = requests.post(url, json=payload, timeout=30)
-    if not resp.ok:
-        payload.pop("parse_mode", None)
-        resp = requests.post(url, json=payload, timeout=30)
-    if not resp.ok:
-        raise RuntimeError(f"Errore Telegram ({resp.status_code}): {resp.text[:300]}")
-    print(f"[INFO] Telegram OK verso {chat_id} | message_id={resp.json().get('result', {}).get('message_id')}")
-
-
-def invia_telegram(testo, token, chat_id):
-    chat_pulito = str(chat_id).strip()
-    if not chat_pulito:
-        raise ValueError("TELEGRAM_CHAT_ID è vuoto.")
-
-    for i in range(0, len(testo), 3800):
-        invia_singolo_messaggio(testo[i:i + 3800], token, chat_pulito)
-
-
-def main():
-    token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
-    chat_id = os.environ["TELEGRAM_CHAT_ID"].strip()
-    groq_key = os.environ["GROQ_API_KEY"].strip()
-
-    titolo, vangelo = recupera_vangelo()
-    storia = genera_storia(titolo, vangelo, groq_key)
-    invia_telegram(storia, token, chat_id)
-
-
-if __name__ == "__main__":
-    main()
+                if len(passo) >= 80 and e_contenuto_vangelo_valido(tit
