@@ -18,8 +18,9 @@ FEED_RISERVA = [
     "https://www.chiesacattolica.it/feed/",
 ]
 
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_CHAT_URL = f"{GROQ_BASE_URL}/chat/completions"
+GROQ_MODELS_URL = f"{GROQ_BASE_URL}/models"
 
 HEADERS = {
     "User-Agent": (
@@ -156,7 +157,40 @@ def recupera_vangelo():
         return recupera_riserva()
 
 
+def scegli_modello_groq(groq_key):
+    headers = {"Authorization": f"Bearer {groq_key}"}
+    resp = requests.get(GROQ_MODELS_URL, headers=headers, timeout=25)
+    if not resp.ok:
+        raise RuntimeError(f"Errore lettura modelli Groq ({resp.status_code}): {resp.text[:300]}")
+
+    dati = resp.json().get("data", [])
+    ids_disponibili = [m.get("id") for m in dati if isinstance(m, dict) and m.get("id")]
+
+    modelli_chat = [
+        mid for mid in ids_disponibili
+        if not any(escluso in mid.lower() for escluso in ("whisper", "guard", "tts", "embed"))
+    ]
+
+    preferiti = [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "llama3-70b-8192",
+        "llama3-8b-8192",
+        "gemma2-9b-it",
+    ]
+    for pref in preferiti:
+        if pref in modelli_chat:
+            return pref
+
+    if modelli_chat:
+        return modelli_chat[0]
+
+    raise RuntimeError(f"Nessun modello chat trovato su Groq. Disponibili: {ids_disponibili[:10]}")
+
+
 def genera_storia(titolo, vangelo, groq_key):
+    modello = scegli_modello_groq(groq_key)
+
     prompt_sistema = (
         "Scrivi una dolce storia della buonanotte per bambini (6-8 anni) "
         "ispirata al Vangelo del giorno. Italiano semplice e sereno, senza "
@@ -168,7 +202,7 @@ def genera_storia(titolo, vangelo, groq_key):
         "Content-Type": "application/json",
     }
     payload = {
-        "model": GROQ_MODEL,
+        "model": modello,
         "messages": [
             {"role": "system", "content": prompt_sistema},
             {"role": "user", "content": prompt_utente},
@@ -176,9 +210,9 @@ def genera_storia(titolo, vangelo, groq_key):
         "temperature": 0.7,
         "max_tokens": 700,
     }
-    resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=45)
+    resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=45)
     if not resp.ok:
-        raise RuntimeError(f"Errore Groq ({resp.status_code}): {resp.text[:300]}")
+        raise RuntimeError(f"Errore Groq con modello '{modello}' ({resp.status_code}): {resp.text[:300]}")
     storia = resp.json()["choices"][0]["message"]["content"].strip()
     if not storia:
         raise ValueError("Risposta Groq vuota.")
@@ -207,3 +241,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
