@@ -157,7 +157,7 @@ def recupera_vangelo():
         return recupera_riserva()
 
 
-def scegli_modello_groq(groq_key):
+def modelli_candidati_groq(groq_key):
     headers = {"Authorization": f"Bearer {groq_key}"}
     resp = requests.get(GROQ_MODELS_URL, headers=headers, timeout=25)
     if not resp.ok:
@@ -166,9 +166,10 @@ def scegli_modello_groq(groq_key):
     dati = resp.json().get("data", [])
     ids_disponibili = [m.get("id") for m in dati if isinstance(m, dict) and m.get("id")]
 
+    esclusi = ("whisper", "guard", "tts", "embed", "orpheus", "playai")
     modelli_chat = [
         mid for mid in ids_disponibili
-        if not any(escluso in mid.lower() for escluso in ("whisper", "guard", "tts", "embed"))
+        if not any(bad in mid.lower() for bad in esclusi)
     ]
 
     preferiti = [
@@ -178,18 +179,18 @@ def scegli_modello_groq(groq_key):
         "llama3-8b-8192",
         "gemma2-9b-it",
     ]
-    for pref in preferiti:
-        if pref in modelli_chat:
-            return pref
+    ordinati = [m for m in preferiti if m in modelli_chat]
+    for m in modelli_chat:
+        if m not in ordinati:
+            ordinati.append(m)
 
-    if modelli_chat:
-        return modelli_chat[0]
-
-    raise RuntimeError(f"Nessun modello chat trovato su Groq. Disponibili: {ids_disponibili[:10]}")
+    if not ordinati:
+        raise RuntimeError(f"Nessun modello testo trovato su Groq. Disponibili: {ids_disponibili[:10]}")
+    return ordinati
 
 
 def genera_storia(titolo, vangelo, groq_key):
-    modello = scegli_modello_groq(groq_key)
+    candidati = modelli_candidati_groq(groq_key)
 
     prompt_sistema = (
         "Scrivi una dolce storia della buonanotte per bambini (6-8 anni) "
@@ -201,22 +202,28 @@ def genera_storia(titolo, vangelo, groq_key):
         "Authorization": f"Bearer {groq_key}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": modello,
-        "messages": [
-            {"role": "system", "content": prompt_sistema},
-            {"role": "user", "content": prompt_utente},
-        ],
-        "temperature": 0.7,
-        "max_tokens": 700,
-    }
-    resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=45)
-    if not resp.ok:
-        raise RuntimeError(f"Errore Groq con modello '{modello}' ({resp.status_code}): {resp.text[:300]}")
-    storia = resp.json()["choices"][0]["message"]["content"].strip()
-    if not storia:
-        raise ValueError("Risposta Groq vuota.")
-    return f"🌙 *Buonanotte dal Vangelo*\n_{titolo}_\n\n{storia}"
+
+    errori = []
+    for modello in candidati[:6]:
+        payload = {
+            "model": modello,
+            "messages": [
+                {"role": "system", "content": prompt_sistema},
+                {"role": "user", "content": prompt_utente},
+            ],
+            "temperature": 0.7,
+            "max_tokens": 700,
+        }
+        resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=45)
+        if resp.ok:
+            storia = resp.json()["choices"][0]["message"]["content"].strip()
+            if storia:
+                return f"🌙 *Buonanotte dal Vangelo*\n_{titolo}_\n\n{storia}"
+            errori.append(f"{modello}: risposta vuota")
+        else:
+            errori.append(f"{modello} ({resp.status_code}): {resp.text[:160]}")
+
+    raise RuntimeError("Nessun modello Groq ha completato la richiesta -> " + " | ".join(errori))
 
 
 def invia_singolo_messaggio(pezzo, token, chat_id):
@@ -251,3 +258,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
