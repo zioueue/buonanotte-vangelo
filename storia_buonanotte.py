@@ -66,18 +66,5 @@ def pulisci(valore):
     return re.sub(r"\s+", " ", testo).strip()
 
 
-def scarica_url(url, timeout=25):
-    ultimo_errore = None
-    for headers in PROFILES_HEADERS:
-        try:
-            r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
-            if r.status_code in (401, 403, 406, 429, 503):
-                ultimo_errore = RuntimeError(f"HTTP {r.status_code} su {url}")
-                continue
-            r.raise_for_status()
-            if r.content:
-                return r
-        except Exception as e:
-            ultimo_errore = e
-            continue
-
+def scarica_url(url, timeout
+                
