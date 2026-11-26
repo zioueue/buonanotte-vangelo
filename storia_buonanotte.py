@@ -18,7 +18,7 @@ FEED_RISERVA = [
     "https://www.chiesacattolica.it/feed/",
 ]
 
-GROQ_API_URL = "https://api.groq.com/v1/chat/completions"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 HEADERS = {
@@ -147,99 +147,4 @@ def recupera_da_vatican():
         except Exception:
             continue
 
-    raise ValueError("Vatican News non ha restituito un testo completo via HTTP statico.")
-
-
-def recupera_da_riserva():
-    for feed_url in FEED_RISERVA:
-        try:
-            r = requests.get(feed_url, headers=HEADERS, timeout=25)
-            r.raise_for_status()
-            parsed = feedparser.parse(r.content)
-            for voce in parsed.entries[:5]:
-                titolo = pulisci_stringa(voce.get("title") or "Vangelo del giorno")
-                grezzo = (
-                    voce.get("summary")
-                    or voce.get("description")
-                    or (voce.get("content", [{}])[0].get("value", ""))
-                    or ""
-                )
-                testo = pulisci_stringa(grezzo)
-                if len(testo) >= 120:
-                    return titolo, testo[:4000]
-        except Exception:
-            continue
-
-    raise ValueError("Nessuna fonte disponibile al momento per il Vangelo del giorno.")
-
-
-def recupera_vangelo():
-    try:
-        return recupera_da_vatican()
-    except Exception:
-        return recupera_da_riserva()
-
-
-def genera_storia(titolo, vangelo, groq_key):
-    system_prompt = (
-        "Sei un narratore dolce e sereno che scrive storie della buonanotte "
-        "per bambini (circa 6-8 anni) ispirate al Vangelo del giorno. "
-        "Scrivi in italiano semplice, caldo e immaginativo, senza toni da predica "
-        "e senza elementi che facciano paura. La storia deve durare circa 2 minuti "
-        "di lettura (circa 200-280 parole), avere un piccolo messaggio positivo "
-        "legato al brano e concludersi con un finale calmo che inviti al riposo."
-    )
-    user_prompt = (
-        f"Titolo/riferimento del giorno: {titolo}\n\n"
-        f"Testo del Vangelo del giorno:\n{vangelo}\n\n"
-        "Scrivi ora la storia della buonanotte per stasera."
-    )
-
-    headers = {
-        "Authorization": f"Bearer {groq_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.7,
-        "max_tokens": 700,
-    }
-    resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=45)
-    resp.raise_for_status()
-    data = resp.json()
-    storia = data["choices"][0]["message"]["content"].strip()
-    if not storia:
-        raise ValueError("La risposta di Groq è vuota.")
-    return f"🌙 *Buonanotte dal Vangelo*\n_{titolo}_\n\n{storia}"
-
-
-def invia_telegram(testo, token, chat_id):
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": testo,
-        "parse_mode": "Markdown",
-    }
-    resp = requests.post(url, json=payload, timeout=30)
-    if not resp.ok:
-        payload.pop("parse_mode", None)
-        resp = requests.post(url, json=payload, timeout=30)
-    resp.raise_for_status()
-
-
-def main():
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    groq_key = os.environ["GROQ_API_KEY"]
-
-    titolo, vangelo = recupera_vangelo()
-    storia = genera_storia(titolo, vangelo, groq_key)
-    invia_telegram(storia, token, chat_id)
-
-
-if __name__ == "__main__":
-    main()
+    raise ValueError("V
