@@ -10,6 +10,7 @@ import requests
 PAGINE_VATICAN = [
     "https://www.vaticannews.va/it/vangelo-del-giorno-e-parola-del-giorno.html",
     "https://www.vaticannews.va/it/chiesa/vangelo-del-giorno.html",
+    "https://www.vaticannews.va/it.html",
 ]
 
 FEED_RISERVA = [
@@ -30,14 +31,24 @@ HEADERS = {
     "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
 }
 
-PAROLE_ESCLUSE = (
+ESCLUSIONI_FORTI = (
     "corso di formazione",
     "generazioni in rete",
-    "convegno",
-    "seminario",
-    "diocesi",
-    "nomina",
-    "cardinale",
+)
+
+INDIZI_VANGELO = (
+    "vangelo",
+    "gesù",
+    "cristo",
+    "discepoli",
+    "signore disse",
+    "in quel tempo",
+    "secondo matteo",
+    "secondo marco",
+    "secondo luca",
+    "secondo giovanni",
+    "liturgia",
+    "parola del giorno",
 )
 
 
@@ -47,11 +58,16 @@ def pulisci(valore):
     return re.sub(r"\s+", " ", testo).strip()
 
 
+def ha_esclusioni_forti(titolo, testo):
+    insieme = f"{titolo} {testo[:400]}".lower()
+    return any(p in insieme for p in ESCLUSIONI_FORTI)
+
+
 def sembra_vangelo(titolo, testo):
-    insieme = f"{titolo} {testo[:800]}".lower()
-    if any(p in insieme for p in PAROLE_ESCLUSE):
+    if ha_esclusioni_forti(titolo, testo):
         return False
-    return ("vangelo" in insieme) or ("gesù" in insieme) or ("discepoli" in insieme)
+    insieme = f"{titolo} {testo}".lower()
+    return any(k in insieme for k in INDIZI_VANGELO)
 
 
 def estrai_json_ld(soup):
@@ -68,7 +84,7 @@ def estrai_json_ld(soup):
             if isinstance(obj, dict):
                 titolo = pulisci(obj.get("headline") or obj.get("name") or "")
                 corpo = pulisci(obj.get("articleBody") or obj.get("description") or "")
-                if len(corpo) >= 200 and sembra_vangelo(titolo, corpo):
+                if len(corpo) >= 120 and sembra_vangelo(titolo, corpo):
                     return titolo or "Vangelo del giorno", corpo
     return "", ""
 
@@ -76,7 +92,7 @@ def estrai_json_ld(soup):
 def estrai_html(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
     titolo_j, corpo_j = estrai_json_ld(soup)
-    if len(corpo_j) >= 200:
+    if len(corpo_j) >= 120:
         return titolo_j, corpo_j
 
     h1 = soup.find("h1")
@@ -88,11 +104,11 @@ def estrai_html(html_content):
     righe = []
     for el in soup.find_all(["p", "h2", "h3", "blockquote"]):
         testo = pulisci(el.get_text())
-        if len(testo) >= 20 and testo not in righe:
+        if len(testo) >= 15 and testo not in righe:
             righe.append(testo)
 
     testo_unito = "\n\n".join(righe).strip()
-    if len(testo_unito) >= 200 and sembra_vangelo(titolo, testo_unito):
+    if len(testo_unito) >= 120 and sembra_vangelo(titolo, testo_unito):
         return titolo, testo_unito
     return titolo, ""
 
@@ -105,7 +121,7 @@ def trova_link_vangelo(base_url, html_content):
         low = full.lower()
         txt = a.get_text(" ", strip=True).lower()
         if "vaticannews.va/it/" in low and low.endswith(".html"):
-            if "vangelo" in low or "vangelo" in txt or "parola-del-giorno" in low:
+            if any(k in low or k in txt for k in ("vangelo", "parola-del-giorno", "liturgia")):
                 if not any(b in low for b in ("/podcast/", "/audio/", "/video/")):
                     if full not in trovati:
                         trovati.append(full)
@@ -118,7 +134,7 @@ def recupera_da_feed():
             r = requests.get(feed_url, headers=HEADERS, timeout=25)
             r.raise_for_status()
             parsed = feedparser.parse(r.content)
-            for voce in parsed.entries[:8]:
+            for voce in parsed.entries[:10]:
                 titolo = pulisci(voce.get("title") or "Vangelo del giorno")
                 grezzo = (
                     voce.get("summary")
@@ -127,7 +143,7 @@ def recupera_da_feed():
                     or ""
                 )
                 testo = pulisci(grezzo)
-                if len(testo) >= 150 and sembra_vangelo(titolo, testo):
+                if len(testo) >= 80 and sembra_vangelo(titolo, testo):
                     return titolo, testo[:4500]
         except Exception:
             continue
@@ -142,7 +158,7 @@ def recupera_da_vatican():
             r = requests.get(url, headers=HEADERS, timeout=25)
             r.raise_for_status()
             titolo, testo = estrai_html(r.text)
-            if len(testo) >= 200:
+            if len(testo) >= 120:
                 return titolo, testo[:4500]
             for link in trova_link_vangelo(url, r.text):
                 if link not in candidati:
@@ -150,7 +166,7 @@ def recupera_da_vatican():
         except Exception:
             continue
 
-    for link in candidati[:10]:
+    for link in candidati[:12]:
         if link in visti:
             continue
         visti.add(link)
@@ -158,7 +174,7 @@ def recupera_da_vatican():
             r = requests.get(link, headers=HEADERS, timeout=25)
             r.raise_for_status()
             titolo, testo = estrai_html(r.text)
-            if len(testo) >= 200:
+            if len(testo) >= 120:
                 return titolo, testo[:4500]
         except Exception:
             continue
@@ -167,7 +183,6 @@ def recupera_da_vatican():
 
 
 def recupera_vangelo():
-    # Prima proviamo i feed dedicati al Vangelo del giorno, poi Vatican News
     titolo, testo = recupera_da_feed()
     if testo:
         return titolo, testo
