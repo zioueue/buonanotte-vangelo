@@ -27,19 +27,17 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
 }
 
 
-def pulisci_stringa(valore):
+def pulisci(valore):
     testo = html.unescape(valore or "")
     testo = re.sub(r"<[^>]+>", " ", testo)
-    testo = re.sub(r"\s+", " ", testo).strip()
-    return testo
+    return re.sub(r"\s+", " ", testo).strip()
 
 
-def estrai_testo_da_json_ld(soup):
+def estrai_json_ld(soup):
     for script in soup.find_all("script", type="application/ld+json"):
         raw = script.string or script.get_text() or ""
         if not raw.strip():
@@ -48,87 +46,66 @@ def estrai_testo_da_json_ld(soup):
             dati = json.loads(raw)
         except Exception:
             continue
-
         oggetti = dati if isinstance(dati, list) else [dati]
         for obj in oggetti:
-            if not isinstance(obj, dict):
-                continue
-            titolo = pulisci_stringa(obj.get("headline") or obj.get("name") or "")
-            corpo = pulisci_stringa(obj.get("articleBody") or obj.get("description") or "")
-            if len(corpo) >= 150:
-                return titolo or "Vangelo del giorno", corpo
+            if isinstance(obj, dict):
+                titolo = pulisci(obj.get("headline") or obj.get("name") or "")
+                corpo = pulisci(obj.get("articleBody") or obj.get("description") or "")
+                if len(corpo) >= 150:
+                    return titolo or "Vangelo del giorno", corpo
     return "", ""
 
 
-def estrai_da_html_vatican(html_content):
+def estrai_html(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
-
-    titolo_json, corpo_json = estrai_testo_da_json_ld(soup)
-    if len(corpo_json) >= 150:
-        return titolo_json, corpo_json
+    titolo_j, corpo_j = estrai_json_ld(soup)
+    if len(corpo_j) >= 150:
+        return titolo_j, corpo_j
 
     h1 = soup.find("h1")
-    og_title = soup.find("meta", attrs={"property": "og:title"})
-    meta_desc = soup.find("meta", attrs={"name": "description"})
-    if not meta_desc:
-        meta_desc = soup.find("meta", attrs={"property": "og:description"})
-
-    if h1 and pulisci_stringa(h1.get_text()):
-        titolo = pulisci_stringa(h1.get_text())
-    elif og_title and og_title.get("content"):
-        titolo = pulisci_stringa(og_title.get("content"))
-    else:
-        titolo = "Vangelo del giorno"
+    titolo = pulisci(h1.get_text()) if h1 and pulisci(h1.get_text()) else "Vangelo del giorno"
 
     for tag in soup(["script", "style", "nav", "header", "footer", "aside", "noscript"]):
         tag.decompose()
 
     righe = []
     for el in soup.find_all(["p", "h2", "h3", "blockquote"]):
-        testo = pulisci_stringa(el.get_text())
+        testo = pulisci(el.get_text())
         if len(testo) >= 15 and testo not in righe:
             righe.append(testo)
 
     testo_unito = "\n\n".join(righe).strip()
     if len(testo_unito) >= 120:
         return titolo, testo_unito
-
-    if meta_desc and meta_desc.get("content"):
-        desc = pulisci_stringa(meta_desc.get("content"))
-        if len(desc) >= 60:
-            return titolo, desc
-
     return titolo, ""
 
 
-def trova_link_vatican(base_url, html_content):
+def trova_link(base_url, html_content):
     soup = BeautifulSoup(html_content, "html.parser")
     trovati = []
     for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        full = urljoin(base_url, href).split("#")[0]
+        full = urljoin(base_url, a["href"].strip()).split("#")[0]
         low = full.lower()
         txt = a.get_text(" ", strip=True).lower()
         if "vaticannews.va/it/" in low and low.endswith(".html"):
             if any(k in low or k in txt for k in ("vangelo", "parola-del-giorno", "liturgia")):
-                if not any(bad in low for bad in ("/podcast/", "/audio/", "/video/")):
+                if not any(b in low for b in ("/podcast/", "/audio/", "/video/")):
                     if full not in trovati:
                         trovati.append(full)
     return trovati
 
 
-def recupera_da_vatican():
+def recupera_vatican():
     candidati = []
     visti = set()
-
     for url in PAGINE_VATICAN:
         try:
             r = requests.get(url, headers=HEADERS, timeout=25)
             r.raise_for_status()
-            titolo, testo = estrai_da_html_vatican(r.text)
+            titolo, testo = estrai_html(r.text)
             if len(testo) >= 150 and "vangelo" in (titolo + " " + testo[:400]).lower():
                 return titolo, testo[:4000]
-            for link in trova_link_vatican(url, r.text):
+            for link in trova_link(url, r.text):
                 if link not in candidati:
                     candidati.append(link)
         except Exception:
@@ -141,10 +118,92 @@ def recupera_da_vatican():
         try:
             r = requests.get(link, headers=HEADERS, timeout=25)
             r.raise_for_status()
-            titolo, testo = estrai_da_html_vatican(r.text)
+            titolo, testo = estrai_html(r.text)
             if len(testo) >= 150:
                 return titolo, testo[:4000]
         except Exception:
             continue
 
-    raise ValueError("V
+    raise ValueError("Nessun testo trovato su Vatican News.")
+
+
+def recupera_riserva():
+    for feed_url in FEED_RISERVA:
+        try:
+            r = requests.get(feed_url, headers=HEADERS, timeout=25)
+            r.raise_for_status()
+            parsed = feedparser.parse(r.content)
+            for voce in parsed.entries[:5]:
+                titolo = pulisci(voce.get("title") or "Vangelo del giorno")
+                grezzo = (
+                    voce.get("summary")
+                    or voce.get("description")
+                    or (voce.get("content", [{}])[0].get("value", ""))
+                    or ""
+                )
+                testo = pulisci(grezzo)
+                if len(testo) >= 120:
+                    return titolo, testo[:4000]
+        except Exception:
+            continue
+    raise ValueError("Nessun feed di riserva disponibile.")
+
+
+def recupera_vangelo():
+    try:
+        return recupera_vatican()
+    except Exception:
+        return recupera_riserva()
+
+
+def genera_storia(titolo, vangelo, groq_key):
+    prompt_sistema = (
+        "Scrivi una dolce storia della buonanotte per bambini (6-8 anni) "
+        "ispirata al Vangelo del giorno. Italiano semplice e sereno, senza "
+        "prediche o elementi paurosi, circa 200-250 parole, con finale calmo."
+    )
+    prompt_utente = f"Titolo: {titolo}\n\nVangelo:\n{vangelo}"
+    headers = {
+        "Authorization": f"Bearer {groq_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": prompt_sistema},
+            {"role": "user", "content": prompt_utente},
+        ],
+        "temperature": 0.7,
+        "max_tokens": 700,
+    }
+    resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=45)
+    if not resp.ok:
+        raise RuntimeError(f"Errore Groq ({resp.status_code}): {resp.text[:300]}")
+    storia = resp.json()["choices"][0]["message"]["content"].strip()
+    if not storia:
+        raise ValueError("Risposta Groq vuota.")
+    return f"🌙 *Buonanotte dal Vangelo*\n_{titolo}_\n\n{storia}"
+
+
+def invia_telegram(testo, token, chat_id):
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": testo, "parse_mode": "Markdown"}
+    resp = requests.post(url, json=payload, timeout=30)
+    if not resp.ok:
+        payload.pop("parse_mode", None)
+        resp = requests.post(url, json=payload, timeout=30)
+    resp.raise_for_status()
+
+
+def main():
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    groq_key = os.environ["GROQ_API_KEY"]
+
+    titolo, vangelo = recupera_vangelo()
+    storia = genera_storia(titolo, vangelo, groq_key)
+    invia_telegram(storia, token, chat_id)
+
+
+if __name__ == "__main__":
+    main()
