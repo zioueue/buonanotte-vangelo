@@ -62,6 +62,8 @@ TERMINATORI_BLOCCANTI = (
     "nomina",
     "intervista",
     "podcast",
+    "giornata mondiale",
+    "gente di mare",
 )
 
 
@@ -95,9 +97,9 @@ def e_contenuto_vangelo_valido(titolo, testo):
     insieme = f"{titolo} {testo}".lower()
     if any(bad in t_low for bad in TERMINATORI_BLOCCANTI):
         return False
-    if any(bad in insieme for bad in ("corso di formazione", "generazioni in rete")):
+    if any(bad in insieme for bad in ("corso di formazione", "generazioni in rete", "giornata mondiale")):
         return False
-    ha_riferimento = bool(RIFERIMENTO_BIBLICO_RE.search(f"{titolo} {testo}"))
+    ha_riferimento = bool(RIFERIMENTO_BIBLICO_RE.search(f"{titolo} {testo[:600]}"))
     ha_inizio_liturgico = "in quel tempo" in insieme or any(
         k in t_low for k in ("vangelo", "parola del giorno", "liturgia del giorno", "luca ", "matteo ", "marco ", "giovanni ")
     )
@@ -105,8 +107,12 @@ def e_contenuto_vangelo_valido(titolo, testo):
 
 
 def estrai_riferimento(titolo, testo):
-    m = RIFERIMENTO_BIBLICO_RE.search(f"{titolo} {testo}")
-    return re.sub(r"\s+", " ", m.group(0)).strip() if m else ""
+    # Cerca prima nel titolo, poi nella prima parte del testo
+    for porzione in (titolo or "", (testo or "")[:600]):
+        m = RIFERIMENTO_BIBLICO_RE.search(porzione)
+        if m:
+            return re.sub(r"\s+", " ", m.group(0)).strip()
+    return ""
 
 
 def isola_passo_vangelo(testo):
@@ -369,10 +375,11 @@ def genera_storia(titolo, vangelo, groq_key):
         "1) NON inventare mai personaggi, nomi, luoghi o vicende di fantasia estranei "
         "al brano del Vangelo fornito.\n"
         "2) Apri con una citazione breve e fedele del passo del Vangelo del giorno "
-        "(tra virgolette), poi spiega con parole semplici e rassicuranti cosa dice il brano.\n"
-        "3) Scrivi un testo unico, scorrevole e senza ripetizioni di circa 120-150 parole, "
-        "adatto a bambini di 6-9 anni, senza toni spaventosi o prediche.\n"
-        "4) Concludi sempre con una frase completa di augurio di serenità e pace per la notte."
+        "(tra virgolette), senza cambiare il Vangelo a cui appartiene il brano.\n"
+        "3) Racconta con parole semplici e adatte a bambini di 6-9 anni ciò che dice "
+        "il brano, senza ripetizioni e senza toni da adulto o predica.\n"
+        "4) Mantieni il testo intorno alle 120-150 parole e chiudi sempre con una "
+        "frase completa di augurio di serenità e pace per la notte."
     )
     prompt_utente = (
         f"Data: {oggi}\n"
