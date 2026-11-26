@@ -80,48 +80,4 @@ def scarica_url(url, timeout=25):
         except Exception as e:
             ultimo_errore = e
             continue
-    if ultimo_errore:
-        raise ultimo_errore
-    raise RuntimeError(f"Impossibile scaricare {url}")
 
-
-def ha_indizio_vangelo(titolo, testo):
-    insieme = f"{titolo} {testo}".lower()
-    return any(k in insieme for k in INDIZI_VANGELO)
-
-
-def estrai_json_ld(soup):
-    for script in soup.find_all("script", type="application/ld+json"):
-        raw = script.string or script.get_text() or ""
-        if not raw.strip():
-            continue
-        try:
-            dati = json.loads(raw)
-        except Exception:
-            continue
-        oggetti = dati if isinstance(dati, list) else [dati]
-        for obj in oggetti:
-            if isinstance(obj, dict):
-                titolo = pulisci(obj.get("headline") or obj.get("name") or "")
-                corpo = pulisci(obj.get("articleBody") or obj.get("description") or "")
-                if len(corpo) >= 120 and ha_indizio_vangelo(titolo, corpo):
-                    return titolo or "Vangelo del giorno", corpo
-    return "", ""
-
-
-def estrai_html(html_content):
-    soup = BeautifulSoup(html_content, "html.parser")
-    titolo_j, corpo_j = estrai_json_ld(soup)
-    if len(corpo_j) >= 120:
-        return titolo_j, corpo_j
-
-    h1 = soup.find("h1")
-    titolo = pulisci(h1.get_text()) if h1 and pulisci(h1.get_text()) else "Vangelo del giorno"
-
-    for tag in soup(["script", "style", "nav", "header", "footer", "aside", "noscript"]):
-        tag.decompose()
-
-    righe = []
-    for el in soup.find_all(["p", "h2", "h3", "blockquote"]):
-        testo = pulisci(el.get_
-        
