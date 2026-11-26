@@ -50,6 +50,13 @@ RIFERIMENTO_BIBLICO_RE = re.compile(
     re.IGNORECASE,
 )
 
+EVANGELISTA_MAP = (
+    ("secondo luca", "Vangelo secondo Luca"),
+    ("secondo matteo", "Vangelo secondo Matteo"),
+    ("secondo marco", "Vangelo secondo Marco"),
+    ("secondo giovanni", "Vangelo secondo Giovanni"),
+)
+
 TITOLI_GENERICI = (
     "messa del giorno",
     "vangelo del giorno",
@@ -109,7 +116,7 @@ def e_contenuto_vangelo_valido(titolo, testo):
         return False
     if any(bad in insieme for bad in ("corso di formazione", "generazioni in rete", "giornata mondiale")):
         return False
-    ha_riferimento = bool(RIFERIMENTO_BIBLICO_RE.search(f"{titolo} {testo[:600]}"))
+    ha_riferimento = bool(RIFERIMENTO_BIBLICO_RE.search(f"{titolo} {testo}"))
     ha_inizio_liturgico = "in quel tempo" in insieme or any(
         k in t_low for k in ("vangelo", "parola del giorno", "liturgia del giorno", "messa del giorno", "luca ", "matteo ", "marco ", "giovanni ")
     )
@@ -117,10 +124,16 @@ def e_contenuto_vangelo_valido(titolo, testo):
 
 
 def estrai_riferimento(titolo, testo):
-    for porzione in (titolo or "", (testo or "")[:600]):
+    for porzione in (titolo or "", testo or ""):
         m = RIFERIMENTO_BIBLICO_RE.search(porzione)
         if m:
-            return re.sub(r"\s+", " ", m.group(0)).strip()
+            rif = re.sub(r"\s*,\s*", ",", m.group(0))
+            rif = re.sub(r"\s*([-–])\s*", r"\1", rif)
+            return re.sub(r"\s+", " ", rif).strip()
+    low = f"{titolo or ''} {testo or ''}".lower()
+    for chiave, etichetta in EVANGELISTA_MAP:
+        if chiave in low:
+            return etichetta
     return ""
 
 
@@ -133,12 +146,12 @@ def e_titolo_generico(titolo):
     return any(t_pulito.startswith(g) and len(t_pulito) <= len(g) + 12 for g in TITOLI_GENERICI)
 
 
-def formatta_intestazione_vangelo(titolo, testo):
-    rif = estrai_riferimento(titolo, testo)
+def formatta_intestazione_vangelo(titolo, testo, riferimento_extra=""):
+    rif = estrai_riferimento(titolo, testo) or pulisci(riferimento_extra)
     if e_titolo_generico(titolo):
-        return f"Vangelo del giorno ({rif})" if rif else "Vangelo del giorno"
+        return f"Vangelo del giorno — {rif}" if rif else "Vangelo del giorno"
     if rif and rif.lower() not in (titolo or "").lower():
-        return f"{titolo} ({rif})"
+        return f"{titolo} — {rif}"
     return titolo
 
 
@@ -388,6 +401,27 @@ def storia_ben_formata(testo):
     return pulito.endswith((".", "!", "?", ".”", "!”", "?”", ".)"))
 
 
+def estrai_rif_da_risposta(testo_risposta):
+    for riga in (testo_risposta or "").splitlines():
+        riga_p = pulisci(riga)
+        if riga_p.lower().startswith("riferimento:"):
+            rif = pulisci(riga_p.split(":", 1)[1])
+            m = RIFERIMENTO_BIBLICO_RE.search(rif)
+            if m:
+                r = re.sub(r"\s*,\s*", ",", m.group(0))
+                r = re.sub(r"\s*([-–])\s*", r"\1", r)
+                return re.sub(r"\s+", " ", r).strip()
+            return rif[:60]
+    return ""
+
+
+def pulisci_corpo_storia(testo_risposta):
+    righe = (testo_risposta or "").splitlines()
+    if righe and pulisci(righe[0]).lower().startswith("riferimento:"):
+        return "\n".join(righe[1:]).strip()
+    return (testo_risposta or "").strip()
+
+
 def genera_storia(titolo, vangelo, groq_key):
     candidati = modelli_candidati_groq(groq_key)
     oggi = datetime.now().strftime("%d/%m/%Y")
@@ -398,18 +432,19 @@ def genera_storia(titolo, vangelo, groq_key):
         "Regole tassative:\n"
         "1) NON inventare mai personaggi, nomi, luoghi o vicende di fantasia estranei "
         "al brano del Vangelo fornito.\n"
-        "2) Apri con una citazione breve e fedele del passo del Vangelo del giorno "
-        "(tra virgolette), senza cambiare il Vangelo a cui appartiene il brano.\n"
-        "3) Racconta con parole semplici e adatte a bambini di 6-9 anni ciò che dice "
-        "il brano, senza ripetizioni e senza toni da adulto o predica.\n"
-        "4) Mantieni il testo intorno alle 120-150 parole e chiudi sempre con una "
+        "2) Sulla primissima riga scrivi esattamente: 'Riferimento: <citazione o passo puntato, es. Lc 21,28>' "
+        "indicando il passo puntato del brano.\n"
+        "3) Dalla seconda riga, apri con una citazione breve e fedele del passo del Vangelo "
+        "(tra virgolette), poi racconta con parole semplici e adatte a bambini di 6-9 anni "
+        "ciò che dice il brano, senza ripetizioni e senza toni da adulto o predica.\n"
+        "4) Mantieni il racconto intorno alle 120-150 parole e chiudi sempre con una "
         "frase completa di augurio di serenità e pace per la notte."
     )
     prompt_utente = (
         f"Data: {oggi}\n"
-        f"Riferimento: {titolo}\n\n"
+        f"Intestazione attuale: {titolo}\n\n"
         f"Brano del Vangelo:\n{vangelo}\n\n"
-        "Scrivi ora la storia della buonanotte fedele al brano, completa e senza ripetizioni."
+        "Scrivi ora la storia della buonanotte con il riferimento puntato sulla prima riga."
     )
 
     headers = {
@@ -426,14 +461,17 @@ def genera_storia(titolo, vangelo, groq_key):
                 {"role": "user", "content": prompt_utente},
             ],
             "temperature": 0.2,
-            "max_tokens": 380,
+            "max_tokens": 400,
         }
         resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=45)
         if resp.ok:
-            storia = resp.json()["choices"][0]["message"]["content"].strip()
+            grezzo = resp.json()["choices"][0]["message"]["content"].strip()
+            rif_model = estrai_rif_da_risposta(grezzo)
+            storia = pulisci_corpo_storia(grezzo)
             if storia_ben_formata(storia):
-                print(f"[INFO] Storia generata con modello Groq: {modello}")
-                return f"🌙 *Buonanotte dal Vangelo*\n_{titolo}_\n\n{storia}"
+                intestazione = formatta_intestazione_vangelo(titolo, vangelo, rif_model)
+                print(f"[INFO] Storia generata con modello Groq: {modello} | {intestazione}")
+                return f"🌙 *Buonanotte dal Vangelo*\n_{intestazione}_\n\n{storia}"
             errori.append(f"{modello}: risposta incompleta o non valida")
         else:
             errori.append(f"{modello} ({resp.status_code}): {resp.text[:160]}")
