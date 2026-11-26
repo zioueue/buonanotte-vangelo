@@ -8,6 +8,8 @@ from bs4 import BeautifulSoup
 import feedparser
 import requests
 
+QUERY_RIFERIMENTO = "citazione vangelo cattolico di oggi"
+
 PAGINE_VATICAN = [
     "https://www.vaticannews.va/it/vangelo-del-giorno-e-parola-del-giorno.html",
     "https://www.vaticannews.va/it/chiesa/vangelo-del-giorno.html",
@@ -16,8 +18,8 @@ PAGINE_VATICAN = [
 
 FEED_RISERVA = [
     "https://vangelodelgiorno.org/IT/rss",
-    "https://www.chiesacattolica.it/feed/",
     "https://www.vaticannews.va/it/rss.xml",
+    "https://www.chiesacattolica.it/feed/",
 ]
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
@@ -50,6 +52,22 @@ PROFILES_HEADERS = [
     },
 ]
 
+INDIZI_VANGELO = (
+    "vangelo",
+    "citazione vangelo",
+    "gesù",
+    "cristo",
+    "discepoli",
+    "signore disse",
+    "in quel tempo",
+    "secondo matteo",
+    "secondo marco",
+    "secondo luca",
+    "secondo giovanni",
+    "parola del giorno",
+    "liturgia",
+)
+
 
 def pulisci(valore):
     testo = html.unescape(valore or "")
@@ -76,6 +94,11 @@ def scarica_url(url, timeout=25):
     raise RuntimeError(f"Impossibile scaricare {url}")
 
 
+def ha_indizio_vangelo(titolo, testo):
+    insieme = f"{titolo} {testo}".lower()
+    return any(k in insieme for k in INDIZI_VANGELO)
+
+
 def estrai_json_ld(soup):
     for script in soup.find_all("script", type="application/ld+json"):
         raw = script.string or script.get_text() or ""
@@ -90,7 +113,7 @@ def estrai_json_ld(soup):
             if isinstance(obj, dict):
                 titolo = pulisci(obj.get("headline") or obj.get("name") or "")
                 corpo = pulisci(obj.get("articleBody") or obj.get("description") or "")
-                if len(corpo) >= 100:
+                if len(corpo) >= 100 and ha_indizio_vangelo(titolo, corpo):
                     return titolo or "Vangelo del giorno", corpo
     return "", ""
 
@@ -114,7 +137,7 @@ def estrai_html(html_content):
             righe.append(testo)
 
     testo_unito = "\n\n".join(righe).strip()
-    if len(testo_unito) >= 100:
+    if len(testo_unito) >= 100 and ha_indizio_vangelo(titolo, testo_unito):
         return titolo, testo_unito
     return titolo, ""
 
@@ -148,9 +171,24 @@ def recupera_da_feed():
                     or ""
                 )
                 testo = pulisci(grezzo)
-                if len(testo) >= 50:
+                link_voce = pulisci(voce.get("link") or "")
+
+                if len(testo) < 120 and link_voce:
+                    try:
+                        pagina_voce = scarica_url(link_voce, timeout=20)
+                        tit_p, testo_p = estrai_html(pagina_voce.text)
+                        if len(testo_p) > len(testo):
+                            testo = testo_p
+                            if tit_p and tit_p != "Vangelo del giorno":
+                                titolo = tit_p
+                    except Exception:
+                        pass
+
+                if len(testo) >= 50 and ha_indizio_vangelo(titolo, testo):
+                    print(f"[INFO] Fonte Vangelo trovata su feed: {feed_url} | {titolo}")
                     return titolo, testo[:4500]
-        except Exception:
+        except Exception as e:
+            print(f"[WARN] Feed non disponibile ({feed_url}): {e}")
             continue
     return "", ""
 
@@ -163,11 +201,13 @@ def recupera_da_vatican():
             r = scarica_url(url, timeout=25)
             titolo, testo = estrai_html(r.text)
             if len(testo) >= 120:
+                print(f"[INFO] Fonte Vangelo trovata su pagina: {url} | {titolo}")
                 return titolo, testo[:4500]
             for link in trova_link_vangelo(url, r.text):
                 if link not in candidati:
                     candidati.append(link)
-        except Exception:
+        except Exception as e:
+            print(f"[WARN] Pagina non disponibile ({url}): {e}")
             continue
 
     for link in candidati[:12]:
@@ -178,6 +218,7 @@ def recupera_da_vatican():
             r = scarica_url(link, timeout=25)
             titolo, testo = estrai_html(r.text)
             if len(testo) >= 120:
+                print(f"[INFO] Fonte Vangelo trovata su articolo: {link} | {titolo}")
                 return titolo, testo[:4500]
         except Exception:
             continue
@@ -195,9 +236,10 @@ def recupera_vangelo():
         return titolo, testo
 
     oggi = datetime.now().strftime("%d/%m/%Y")
+    print(f"[WARN] Nessuna fonte web raggiunta per il {oggi}: uso fallback con data.")
     return (
-        f"Vangelo del {oggi}",
-        f"Brano del Vangelo del giorno per la data {oggi} (rilevato in modalità di riserva).",
+        f"{QUERY_RIFERIMENTO} ({oggi})",
+        f"Richiesta: {QUERY_RIFERIMENTO} per la data {oggi}.",
     )
 
 
@@ -235,24 +277,29 @@ def modelli_candidati_groq(groq_key):
 
 def genera_storia(titolo, vangelo, groq_key):
     candidati = modelli_candidati_groq(groq_key)
+    oggi = datetime.now().strftime("%d/%m/%Y")
 
     prompt_sistema = (
         "Sei un narratore dolce e sereno che scrive storie della buonanotte "
-        "per bambini di 7-8 anni partendo fedelmente dal racconto del Vangelo del giorno. "
+        "per bambini di 7-8 anni a partire dalla citazione e dal racconto del "
+        "Vangelo cattolico del giorno.\n"
         "Regole fondamentali:\n"
-        "1) Racconta l'episodio, la parabola o il messaggio evangelico del Vangelo "
-        "del giorno (se è indicata solo la data o un testo breve, usa il Vangelo del "
-        "giorno corrispondente a quella data), adattato con dolcezza per i bambini, "
-        "senza inventare corsi, convegni o vicende estranee al brano.\n"
-        "2) Usa un linguaggio semplice, caldo e rassicurante, senza toni da predica "
+        "1) Basati sul testo del Vangelo fornito oppure, se è indicata solo la "
+        "data/richiesta del giorno, sul brano evangelico della liturgia cattolica "
+        "corrispondente alla data indicata.\n"
+        "2) Inizia includendo una breve citazione o frase chiave legata al Vangelo "
+        "del giorno, seguita da una storia dolce e fedele all'episodio o al "
+        "messaggio evangelico (con i suoi personaggi e immagini, senza inventare "
+        "gite scolastiche, corsi o vicende estranee al Vangelo).\n"
+        "3) Usa un linguaggio semplice, caldo e rassicurante, senza toni da predica "
         "e senza scene spaventose.\n"
-        "3) Scrivi una storia completa di circa 220-280 parole.\n"
-        "4) Concludi sempre con una frase completa e tranquilla di buonanotte, senza "
-        "mai troncare una parola o una frase a metà."
+        "4) Scrivi una storia completa di circa 220-280 parole e concludi sempre "
+        "con una frase completa e tranquilla di buonanotte."
     )
     prompt_utente = (
-        f"Riferimento del Vangelo: {titolo}\n\n"
-        f"Testo o indicazione del Vangelo del giorno:\n{vangelo}\n\n"
+        f"Data: {oggi} | Ricerca: {QUERY_RIFERIMENTO}\n"
+        f"Riferimento/Titolo: {titolo}\n\n"
+        f"Testo o indicazione del Vangelo:\n{vangelo}\n\n"
         "Scrivi ora la storia della buonanotte completa per stasera."
     )
 
@@ -276,6 +323,7 @@ def genera_storia(titolo, vangelo, groq_key):
         if resp.ok:
             storia = resp.json()["choices"][0]["message"]["content"].strip()
             if storia:
+                print(f"[INFO] Storia generata con modello Groq: {modello}")
                 return f"🌙 *Buonanotte dal Vangelo*\n_{titolo}_\n\n{storia}"
             errori.append(f"{modello}: risposta vuota")
         else:
